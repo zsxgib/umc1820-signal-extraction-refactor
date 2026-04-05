@@ -1,6 +1,7 @@
 """Step 1: 从原始12通道WAV提取标准数据
 
-将每个原始文件重组为3通道标准格式（102秒完整长度）
+将每个原始文件的每个chirp响应提取为独立的3通道标准格式文件
+格式: {原始文件名}_mic5_{波型}_{Chirp编号:02d}_extracted_{日期}.wav
 """
 
 import sys
@@ -24,36 +25,34 @@ class ChirpExtractor:
     def __init__(self, config: PipelineConfig):
         self.config = config
         self.timestamp = datetime.now().strftime('%Y%m%d')
-        self.total_samples = int(102.0 * SAMPLE_RATE)  # 102秒完整长度
+        self.sr = SAMPLE_RATE
 
-    def extract_single_file(self, raw_file: str) -> bool:
+    def extract_single_file(self, raw_file: str) -> int:
         """
         从单个原始文件提取标准数据
 
-        输出102秒完整长度的3通道文件：
-        - ch0: 喇叭参考（全102秒）
-        - ch1: 麦克风（全102秒）
-        - ch2: 所有波型响应叠加在同一通道
+        输出每个chirp为独立的3通道文件：
+        - ch0: 喇叭参考（对应窗口）
+        - ch1: 麦克风响应（对应窗口）
+        - ch2: 0（占位）
+
+        Returns:
+            成功提取的chirp数量
         """
         raw_path = self.config.raw_data_dir / raw_file
         if not raw_path.exists():
             logger.error(f"原始文件不存在: {raw_path}")
-            return False
+            return 0
 
         # 读取原始12通道数据
         sr, data = wavfile.read(raw_path)
         logger.info(f"读取: {raw_file}, 形状: {data.shape}")
 
-        # 创建3通道输出数组（102秒完整长度）
-        output = np.zeros((self.total_samples, 3), dtype=data.dtype)
+        # 提取原始文件名（不含扩展名）
+        raw_basename = raw_file.replace('.wav', '')
+        success_count = 0
 
-        # ch0: 喇叭参考（全102秒，原始通道0）
-        output[:, 0] = data[:self.total_samples, 0]
-
-        # ch1: 麦克风（全102秒，原始通道6）
-        output[:, 1] = data[:self.total_samples, MIC_CHANNEL]
-
-        # ch2: 各波型响应叠加到同一通道
+        # 按波型、按chirp提取
         for wave_type in WAVE_TYPES:
             params = WAVE_PARAMS[wave_type]
             emission_times = params['emission_times']
@@ -72,29 +71,48 @@ class ChirpExtractor:
                 resp_start = int(round(resp_start_time * sr))
                 resp_end = int(round(resp_end_time * sr))
 
-                if resp_end <= len(data):
-                    # 将该chirp的麦克风响应叠加到ch2的对应时间位置
-                    output[resp_start:resp_end, 2] += data[resp_start:resp_end, MIC_CHANNEL]
+                if resp_end > len(data):
+                    resp_end = len(data)
+                if resp_start >= len(data):
+                    continue
 
-        # 生成输出文件名
-        output_filename = f"{raw_file.replace('.wav', '')}_ch6_3ch.wav"
-        output_path = self.config.standard_data_dir / output_filename
+                # 提取窗口数据
+                window_len = resp_end - resp_start
 
-        wavfile.write(output_path, sr, output)
-        logger.info(f"  -> 输出: {output_filename}")
-        return True
+                # 创建3通道输出数组（仅响应窗口长度）
+                output = np.zeros((window_len, 3), dtype=data.dtype)
+
+                # ch0: 喇叭参考（原始通道0，对应窗口）
+                output[:, 0] = data[resp_start:resp_end, 0]
+
+                # ch1: 麦克风（原始通道6，对应窗口）
+                output[:, 1] = data[resp_start:resp_end, MIC_CHANNEL]
+
+                # ch2: 0（占位，与标准格式一致）
+
+                # 生成输出文件名
+                # 格式: {原始文件名}_mic5_{波型}_{Chirp编号:02d}_extracted_{日期}.wav
+                output_filename = f"{raw_basename}_mic5_{wave_type}_{chirp_index:02d}_extracted_{self.timestamp}.wav"
+                output_path = self.config.standard_data_dir / output_filename
+
+                wavfile.write(output_path, sr, output)
+                success_count += 1
+                logger.debug(f"  -> {output_filename} ({window_len}样本, {window_len/sr*1000:.1f}ms)")
+
+        logger.info(f"  {raw_file}: 提取了 {success_count} 个chirp文件")
+        return success_count
 
     def run(self) -> int:
         """运行提取流程"""
         self.config.ensure_dirs()
 
-        success = 0
+        total_success = 0
         for raw_file in VALID_FILES:
-            if self.extract_single_file(raw_file):
-                success += 1
+            count = self.extract_single_file(raw_file)
+            total_success += count
 
-        logger.info(f"Step 1 完成: 共提取 {success} 个标准WAV")
-        return success
+        logger.info(f"Step 1 完成: 共提取 {total_success} 个标准WAV")
+        return total_success
 
 
 def main():

@@ -1,11 +1,13 @@
 """Step 3: 相干累积
 
-按波型累积所有 matched 文件
+对per-chirp matched文件进行相干累积，输出per-chirp accumulated文件
+格式: {波型}_{Chirp编号:02d}_accumulated_{日期}.wav
 """
 
 import sys
 from pathlib import Path
 from datetime import datetime
+from collections import defaultdict
 import numpy as np
 from scipy.io import wavfile
 from scipy import signal
@@ -13,7 +15,6 @@ from scipy import signal
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.chirp_params import WAVE_PARAMS, WAVE_TYPES, SAMPLE_RATE
-from config.raw_files import VALID_FILES
 from pipeline.config import PipelineConfig
 from pipeline.logging import setup_logging, logger
 
@@ -25,7 +26,6 @@ class CoherentAccumulator:
         self.config = config
         self.timestamp = datetime.now().strftime('%Y%m%d')
         self.sr = SAMPLE_RATE
-        self.total_samples = int(102.0 * self.sr)  # 102秒
 
     def find_delay_by_crosscorr(self, ref_signal: np.ndarray, target_signal: np.ndarray) -> int:
         """
@@ -36,18 +36,13 @@ class CoherentAccumulator:
             target_signal: 目标信号 (1D array)，长度须与ref_signal相同
 
         Returns:
-            int: 时延值（正表示target滞后于ref，需要正偏移对齐）
-                 即：用 offset = -delay 进行线性移位可将target对齐到ref
+            int: 时延值（正值表示target滞后，负值表示target超前）
+                 用 offset = -delay 进行线性移位可对齐
         """
-        # 互相关
         corr = signal.correlate(target_signal, ref_signal, mode='full')
-        # 相关长度
         n = len(ref_signal)
-        # 峰值位置（无时延时应在中心位置 n-1）
-        peak_idx = np.argmax(np.abs(corr))
-        # 中心点
         center = n - 1
-        # 时延：正值表示target滞后（需要右移），负值表示target超前（需要左移）
+        peak_idx = np.argmax(np.abs(corr))
         delay = peak_idx - center
         return delay
 
@@ -57,198 +52,154 @@ class CoherentAccumulator:
 
         Args:
             seg: 输入信号
-            offset: 偏移量，正表示向右移（信号晚到，需要右移对齐），负表示向左移
+            offset: 偏移量，正表示向右移，负表示向左移
 
         Returns:
             移位后的信号，长度与输入相同，边缘补零
         """
         if offset > 0:
-            # 正偏移：向右移，右边补零
             shifted = np.pad(seg, (offset, 0), mode='constant')[:len(seg)]
         elif offset < 0:
-            # 负偏移：向左移，左边补零
             shifted = np.pad(seg, (0, -offset), mode='constant')[-len(seg):]
         else:
             shifted = seg
         return shifted
 
-    def accumulate_wave_to_buffer(self, wave_type: str, output_buffer: np.ndarray, files: list) -> None:
+    def accumulate_single(self, files: list) -> bool:
         """
-        将指定波型的所有 matched 文件累积到缓冲区
+        对一组per-chirp matched文件进行相干累积
 
         Args:
-            wave_type: 波型 (PS/SV/SH/A0H/A0L)
-            output_buffer: 完整长度的输出缓冲区 (samples, 3)
-            files: matched 文件列表
+            files: 同一波型同一chirp编号的所有matched文件路径列表
+
+        Returns:
+            是否成功
         """
-        params = WAVE_PARAMS[wave_type]
-        emission_times = params['emission_times']
-        delay_min = params['delay_min']
-        delay_max = params['delay_max']
-        duration = params['duration']
+        if not files:
+            return False
 
-        # 波型通道映射：PS=2, SV=3, SH=4, A0H=5, A0L=6
-        wave_channel = {'PS': 2, 'SV': 3, 'SH': 4, 'A0H': 5, 'A0L': 6}[wave_type]
+        # 从文件名解析波型和chirp编号
+        # 格式: {raw_name}_mic5_{wave}_{chirp:02d}_matched_{date}.wav
+        filename = files[0].name
+        parts = filename.replace('.wav', '').split('_')
+        try:
+            mic5_idx = parts.index('mic5')
+            wave_type = parts[mic5_idx + 1]
+            chirp_str = parts[mic5_idx + 2]
+            chirp_index = int(chirp_str)  # 1-indexed
+        except (ValueError, IndexError):
+            logger.error(f"文件名格式错误，无法解析: {filename}")
+            return False
 
-        logger.info(f"  {wave_type}: 累积 {len(emission_times)} 个 chirp")
+        logger.info(f"  {wave_type} chirp {chirp_index}: 累积 {len(files)} 个文件")
 
-        # 计算第一个chirp的响应窗口大小
-        # 使用与原始版本相同的计算方式，避免浮点数精度问题
-        # response_end = emission_time + delay_max (精确值 83.3)
-        # duration 单独加，避免 83.4 = 82.0 + 1.3 + 0.1 的浮点数精度损失
-        first_emission = emission_times[0]
-        first_resp_start_time = first_emission + delay_min
-        first_resp_end_time = first_emission + delay_max
-        first_start_sample = int(first_resp_start_time * self.sr)
-        first_end_sample = int(first_resp_end_time * self.sr) + int(duration * self.sr)
-        window_len = first_end_sample - first_start_sample
+        # 读取第一个文件获取窗口长度和ch1参考值
+        sr, first_data = wavfile.read(files[0])
+        window_len = len(first_data)
 
-        # 为该波型创建累积buffer
-        wave_buffer = np.zeros(window_len, dtype=np.float64)
+        # ch1是麦克风响应，用于计算scale_factor
+        orig_max = np.max(np.abs(first_data[:, 1].astype(np.float64)))
 
-        # 对每个 chirp 分别收集、对齐、累加
-        for i, emission_time in enumerate(emission_times):
-            chirp_idx = i + 1  # 1-indexed
+        # 收集所有文件的ch2（匹配滤波结果）进行累积
+        all_segments = []
+        for f in files:
+            _, data = wavfile.read(f)
+            if len(data) != window_len:
+                # 补零到相同长度
+                if len(data) < window_len:
+                    data = np.pad(data, ((0, window_len - len(data)), (0, 0)), mode='constant')
+                else:
+                    data = data[:window_len]
+            all_segments.append(data[:, 2].astype(np.float64))  # ch2: 匹配滤波结果
 
-            # 计算响应窗口大小
-            # 使用与原始版本相同的计算方式，避免浮点数精度问题
-            resp_start_time = emission_time + delay_min
-            resp_end_time = emission_time + delay_max
-            start_sample = int(resp_start_time * self.sr)
-            end_sample = int(resp_end_time * self.sr) + int(duration * self.sr)
-            resp_window_len = end_sample - start_sample
+        # 使用第一个segment作为参考
+        ref_segment = all_segments[0]
 
-            # 收集所有文件该chirp的响应
-            all_segments = []
-            all_peak_positions = []
+        # 创建累积数组
+        accumulated = np.zeros(window_len, dtype=np.float64)
+        accumulated += ref_segment
 
-            for f in files:
-                try:
-                    _, data = wavfile.read(f)
-                except Exception as e:
-                    logger.warning(f"读取失败 {f}: {e}")
-                    continue
+        # 对其他segment用互相关找时延，线性移位对齐后累加
+        for seg in all_segments[1:]:
+            delay = self.find_delay_by_crosscorr(ref_segment, seg)
+            shifted = self.linear_shift(seg, -delay)
+            accumulated += shifted
 
-                if len(data) <= start_sample:
-                    continue
-
-                # 从对应波型通道读取该chirp的滤波结果，强制为固定长度window_len
-                seg_end = min(start_sample + window_len, len(data))
-                segment = data[start_sample:seg_end, wave_channel].astype(np.float64)
-
-                # 如果长度不足，补零到window_len
-                if len(segment) < window_len:
-                    segment = np.pad(segment, (0, window_len - len(segment)), mode='constant')
-
-                if len(segment) > 0:
-                    peak_idx = np.argmax(np.abs(segment))
-                    all_segments.append(segment)
-                    all_peak_positions.append(peak_idx)
-
-            if len(all_segments) == 0:
-                continue
-
-            # 使用互相关找时延对齐（替代循环移位）
-            # 以第一个segment为参考
-            ref_segment = all_segments[0]
-
-            # 创建该chirp的累积数组
-            chirp_accumulated = np.zeros(window_len, dtype=np.float64)
-
-            # 参考segment直接累积
-            chirp_accumulated += ref_segment
-
-            # 对其他segment用互相关找时延，线性移位对齐后累加
-            for seg in all_segments[1:]:
-                # 使用互相关找时延
-                delay = self.find_delay_by_crosscorr(ref_segment, seg)
-                # 线性移位对齐
-                # delay > 0 表示 seg 晚到（需左移，offset为负）
-                # delay < 0 表示 seg 早到（需右移，offset为正）
-                # offset = -delay 实现正确的对齐方向
-                shifted = self.linear_shift(seg, -delay)
-                chirp_accumulated += shifted
-
-            # 累加到wave_buffer
-            actual_len = min(len(chirp_accumulated), len(wave_buffer))
-            wave_buffer[:actual_len] += chirp_accumulated[:actual_len]
-
-            logger.debug(f"    {wave_type} chirp {chirp_idx}: 累积了 {len(all_segments)} 个文件 (使用互相关对齐)")
-
-        # 计算缩放因子
-        # 与原始Step3一致：使用整个matched文件ch1的最大值（不是仅响应窗口）
-        # data_ref[:, 1]是matched文件的麦克风通道，取整个102秒的最大值
-        orig_max = np.max(np.abs(output_buffer[:, 1]))  # 整个102秒麦克风信号的最大值
-        accum_max = np.max(np.abs(wave_buffer))
-
+        # 计算scale_factor
+        accum_max = np.max(np.abs(accumulated))
         if accum_max > 0 and orig_max > 0:
-            scale = orig_max * 0.8 / accum_max  # 缩放到原信号最大值的80%
+            scale = orig_max * 0.8 / accum_max
         else:
             scale = 1.0
 
-        logger.debug(f"  {wave_type}: orig_max={orig_max:.2e}, accum_max={accum_max:.2e}, scale={scale:.4f}")
+        logger.debug(f"    orig_max={orig_max:.2e}, accum_max={accum_max:.2e}, scale={scale:.4f}")
 
-        wave_buffer = wave_buffer * scale
+        # 应用scale
+        accumulated = accumulated * scale
 
-        # 将波型累积结果放置到输出缓冲区的第一个chirp位置
-        # 与原始版本一致：最后统一clip，不在每步clip
-        end_sample = min(first_start_sample + window_len, self.total_samples)
-        actual_len = end_sample - first_start_sample
-        output_buffer[first_start_sample:end_sample, 2] += wave_buffer[:actual_len]
+        # 创建3通道输出
+        output_data = np.zeros((window_len, 3), dtype=np.float64)
+        output_data[:, 0] = first_data[:, 0].astype(np.float64)  # ch0: 喇叭参考
+        output_data[:, 1] = first_data[:, 1].astype(np.float64)  # ch1: 麦克风响应
+        output_data[:, 2] = accumulated  # ch2: 相干累积结果
+
+        # clip到int32范围
+        int32_max = 2147483647
+        output_data = np.clip(output_data, -int32_max, int32_max).astype(np.int32)
+
+        # 生成输出文件名
+        # 格式: {波型}_{Chirp编号:02d}_accumulated_{日期}.wav
+        output_filename = f"{wave_type}_{chirp_index:02d}_accumulated_{self.timestamp}.wav"
+        output_path = self.config.output_dir / output_filename
+
+        wavfile.write(output_path, sr, output_data)
+        logger.debug(f"    -> {output_filename}")
+
+        return True
 
     def run(self) -> bool:
         """运行相干累积"""
-        # 创建输出目录
-        output_dir = self.config.output_dir
-        output_dir.mkdir(parents=True, exist_ok=True)
+        self.config.ensure_dirs()
 
-        # 创建完整长度的输出缓冲区 (102秒，float64与原始版本一致)
-        output_buffer = np.zeros((self.total_samples, 3), dtype=np.float64)
-        logger.info(f"创建输出缓冲区: {self.total_samples} 样本 ({self.total_samples/self.sr:.1f}秒)")
-
-        # 查找 matched 文件
-        matched_files = sorted(self.config.step2_output_dir.glob('matched_*_ch6_7ch.wav'))
-        logger.info(f"找到 {len(matched_files)} 个 matched 文件")
-
-        # 与原始版本一致：限制为 NUM_MICS=8 个文件
-        NUM_MICS = 8
-        matched_files = matched_files[:NUM_MICS]
-        logger.info(f"限制为前 {len(matched_files)} 个文件进行累积")
+        # 查找所有per-chirp matched文件
+        matched_files = list(self.config.step2_output_dir.glob('*_mic5_*_matched_*.wav'))
+        logger.info(f"找到 {len(matched_files)} 个per-chirp matched文件")
 
         if not matched_files:
             logger.warning("没有找到 matched 文件!")
             return False
 
-        # 从第一个matched文件加载 ch0 和 ch1（与原始版本一致）
-        logger.info("从matched文件加载完整信号...")
-        _, ref_data = wavfile.read(matched_files[0])
+        # 按波型和chirp编号分组
+        file_groups = defaultdict(list)
+        for f in matched_files:
+            filename = f.name
+            parts = filename.replace('.wav', '').split('_')
+            try:
+                mic5_idx = parts.index('mic5')
+                wave_type = parts[mic5_idx + 1]
+                chirp_str = parts[mic5_idx + 2]
+                chirp_index = int(chirp_str)
+                key = (wave_type, chirp_index)
+                file_groups[key].append(f)
+            except (ValueError, IndexError):
+                logger.warning(f"跳过无法解析的文件: {filename}")
+                continue
 
-        # ch0=喇叭参考, ch1=麦克风（float64与原始版本一致）
-        output_buffer[:, 0] = ref_data[:self.total_samples, 0].astype(np.float64)
-        output_buffer[:, 1] = ref_data[:self.total_samples, 1].astype(np.float64)
-        logger.info(f"  ch0 (喇叭) max: {np.max(np.abs(output_buffer[:,0])):.2e}")
-        logger.info(f"  ch1 (麦克风) max: {np.max(np.abs(output_buffer[:,1])):.2e}")
+        logger.info(f"共有 {len(file_groups)} 个波型/chirp组合")
 
-        # 按波型累积
-        for wave_type in WAVE_TYPES:
-            logger.info(f"处理波型: {wave_type}")
-            self.accumulate_wave_to_buffer(wave_type, output_buffer, matched_files)
+        # 限制每个组合最多8个文件（与原始版本一致）
+        NUM_MICS = 8
+        for key in file_groups:
+            file_groups[key] = sorted(file_groups[key])[:NUM_MICS]
 
-        # 生成最终输出文件名
-        output_filename = f"coherent_accumulation_{self.timestamp}.wav"
-        output_path = output_dir / output_filename
+        # 对每个波型chirp组合进行累积
+        success_count = 0
+        for (wave_type, chirp_index), files in sorted(file_groups.items()):
+            if self.accumulate_single(files):
+                success_count += 1
 
-        # 与原始版本一致：最后统一clip到int32范围后保存
-        output_int = np.clip(output_buffer, -2147483647, 2147483647).astype(np.int32)
-        wavfile.write(output_path, self.sr, output_int)
-        logger.info(f"Step 3 完成: {output_path}")
-        logger.info(f"  形状: {output_int.shape}")
-        logger.info(f"  时长: {len(output_int)/self.sr:.1f}秒")
-        logger.info(f"  ch0 max: {np.max(np.abs(output_int[:,0]))}")
-        logger.info(f"  ch1 max: {np.max(np.abs(output_int[:,1]))}")
-        logger.info(f"  ch2 max: {np.max(np.abs(output_int[:,2]))}")
-
-        return True
+        logger.info(f"Step 3 完成: 累积了 {success_count}/{len(file_groups)} 个文件")
+        return success_count > 0
 
 
 def main():
