@@ -79,14 +79,24 @@ class ChirpExtractor:
                 # 提取窗口数据
                 window_len = resp_end - resp_start
 
-                # 创建3通道输出数组（仅响应窗口长度）
+                # 创建3通道输出数组（响应窗口长度）
                 output = np.zeros((window_len, 3), dtype=data.dtype)
 
-                # ch0: 喇叭参考（原始通道0，对应窗口）
-                output[:, 0] = data[resp_start:resp_end, 0]
+                # 喇叭模板：严格从 emission_time 整秒时刻开始
+                chirp_start = int(emission_time * sr)
+                chirp_end = chirp_start + int(duration * sr)
 
-                # ch1: 麦克风（原始通道6，对应窗口）
-                output[:, 1] = data[resp_start:resp_end, MIC_CHANNEL]
+                # 麦克风响应（对应响应窗口）
+                mic_window = data[resp_start:resp_end, MIC_CHANNEL].astype(np.float64)
+
+                # ch0: 喇叭参考（原始通道0，严格从发射时刻开始）
+                chirp_len = chirp_end - chirp_start
+                actual_chirp_len = min(chirp_len, window_len)
+                if chirp_start >= 0 and chirp_start + actual_chirp_len <= len(data):
+                    output[:actual_chirp_len, 0] = data[chirp_start:chirp_start + actual_chirp_len, 0]
+
+                # ch1: 麦克风（原始通道6，对应响应窗口）
+                output[:, 1] = mic_window
 
                 # ch2: 0（占位，与标准格式一致）
 
