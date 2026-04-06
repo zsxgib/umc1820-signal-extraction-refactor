@@ -17,7 +17,7 @@ from scipy import signal
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config.chirp_params import WAVE_PARAMS, WAVE_TYPES, SAMPLE_RATE, ACTIVE_MICS, get_mic_channel_name, get_mic_channel_1indexed, get_wave_params_for_mic
+from config.chirp_params import WAVE_PARAMS, WAVE_TYPES, SAMPLE_RATE, ACTIVE_MICS, get_mic_channel_name, get_mic_channel_1indexed, get_wave_params_for_mic, SAVE_FORMAT
 from config.raw_files import VALID_FILES
 from pipeline.config import PipelineConfig
 from pipeline.logging import setup_logging, logger
@@ -67,7 +67,7 @@ class CoherentAccumulator:
 
         # 从文件名解析波型和chirp编号
         filename = files[0].name
-        parts = filename.replace('.wav', '').split('_')
+        parts = filename.replace('.wav', '').replace('.npz', '').split('_')
         try:
             mic_idx = parts.index(mic_name)
             wave_type = parts[mic_idx + 1]
@@ -78,7 +78,13 @@ class CoherentAccumulator:
             return None, 0
 
         # 读取第一个文件获取窗口长度
-        sr, first_data = wavfile.read(files[0])
+        first_file = files[0]
+        if first_file.suffix == '.npz':
+            loaded = np.load(first_file)
+            first_data = loaded['data']
+            sr = SAMPLE_RATE
+        else:
+            sr, first_data = wavfile.read(first_file)
         window_len = len(first_data)
 
         # ch2是麦克风响应，用于计算scale_factor
@@ -87,7 +93,11 @@ class CoherentAccumulator:
         # 收集所有文件的ch3（匹配滤波结果）进行累积
         all_segments = []
         for f in files:
-            _, data = wavfile.read(f)
+            if f.suffix == '.npz':
+                loaded = np.load(f)
+                data = loaded['data']
+            else:
+                _, data = wavfile.read(f)
             if len(data) != window_len:
                 if len(data) < window_len:
                     data = np.pad(data, ((0, window_len - len(data)), (0, 0)), mode='constant')
@@ -134,8 +144,10 @@ class CoherentAccumulator:
 
         logger.info(f"处理 MIC: {mic_name} (第{mic_channel_1indexed}通道)")
 
-        # 查找该MIC的per-chirp matched文件
-        matched_files = list(self.config.get_step2_dir(mic_name).glob(f'*_{mic_name}_*_matched_*.wav'))
+        # 查找该MIC的per-chirp matched文件（npz或wav格式）
+        matched_files = []
+        matched_files.extend(self.config.get_step2_dir(mic_name).glob(f'*_{mic_name}_*_matched_*.npz'))
+        matched_files.extend(self.config.get_step2_dir(mic_name).glob(f'*_{mic_name}_*_matched_*.wav'))
         logger.info(f"  找到 {len(matched_files)} 个per-chirp matched文件")
 
         if not matched_files:
@@ -146,7 +158,7 @@ class CoherentAccumulator:
         file_groups = defaultdict(list)
         for f in matched_files:
             filename = f.name
-            parts = filename.replace('.wav', '').split('_')
+            parts = filename.replace('.wav', '').replace('.npz', '').split('_')
             try:
                 mic_idx_pos = parts.index(mic_name)
                 wave_type = parts[mic_idx_pos + 1]
@@ -221,7 +233,13 @@ class CoherentAccumulator:
                 files = file_groups[key]
 
                 # 读取speaker参考和麦克风信号（从第一个文件）
-                sr_ref, ref_data = wavfile.read(files[0])
+                first_file = files[0]
+                if first_file.suffix == '.npz':
+                    loaded = np.load(first_file)
+                    ref_data = loaded['data']
+                    sr_ref = SAMPLE_RATE
+                else:
+                    sr_ref, ref_data = wavfile.read(first_file)
                 ref_ch1 = ref_data[:, 0].astype(np.float64)
                 ref_ch2 = ref_data[:, 1].astype(np.float64)
                 chirp_signals[key] = (ref_ch1, ref_ch2, len(ref_ch1))
@@ -304,9 +322,13 @@ class CoherentAccumulator:
             int32_max = 2147483647
             wave_output = np.clip(wave_output, -int32_max, int32_max).astype(np.int32)
 
-            output_filename = f"{mic_name}_{wave_type}_accumulated_{self.timestamp}.wav"
+            ext = 'npz' if SAVE_FORMAT == 'npz' else 'wav'
+            output_filename = f"{mic_name}_{wave_type}_accumulated_{self.timestamp}.{ext}"
             output_path = self.config.get_step3_dir(mic_name) / output_filename
-            wavfile.write(output_path, self.sr, wave_output)
+            if SAVE_FORMAT == 'npz':
+                np.savez_compressed(output_path, data=wave_output)
+            else:
+                wavfile.write(output_path, self.sr, wave_output)
             logger.info(f"    -> {output_filename}")
 
         # 填充102秒版本的第1通道（喇叭参考）和第3通道（mic参考per-chirp）
@@ -340,7 +362,7 @@ class CoherentAccumulator:
             if actual_ch2_len > 0:
                 output_buffer[resp_start_sample:resp_start_sample + actual_ch2_len, 2] = ch2_data[delay_min_samples:delay_min_samples + actual_ch2_len]
 
-        # 生成102秒完整版本
+        # 生成102秒完整版本（强制输出WAV格式）
         output_filename_full = f"{mic_name}_coherent_accumulation_{self.timestamp}.wav"
         output_path_full = self.config.get_step3_dir(mic_name) / output_filename_full
 
