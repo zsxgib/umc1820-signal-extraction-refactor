@@ -314,9 +314,11 @@ class CoherentAccumulator:
                 output_buffer[start_sample:start_sample + actual_ch1_len, 0] = ch1_data[:actual_ch1_len]
 
             # 第3通道: mic参考per-chirp从emission_time + delay_min开始
+            delay_max = params['delay_max']
+            response_len = int((delay_max - delay_min + duration) * self.sr)
             resp_start_sample = int((emission_time + delay_min) * self.sr)
             delay_min_samples = int(delay_min * self.sr)
-            actual_ch2_len = min(window_len, len(ch2_data) - delay_min_samples, self.total_samples - resp_start_sample)
+            actual_ch2_len = min(response_len, len(ch2_data) - delay_min_samples, self.total_samples - resp_start_sample)
             if actual_ch2_len > 0:
                 output_buffer[resp_start_sample:resp_start_sample + actual_ch2_len, 2] = ch2_data[delay_min_samples:delay_min_samples + actual_ch2_len]
 
