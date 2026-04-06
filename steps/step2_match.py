@@ -72,12 +72,26 @@ class MatchedFilterProcessor:
             logger.warning(f"模板或响应为空: {filename}")
             return False
 
-        # 匹配滤波 (互相关)
-        matched = signal.correlate(response, chirp_template, mode='same')
+        # 响应窗口参数
+        delay_min_samples = int(delay_min * self.sr)
+        chirp_duration_samples = int(duration * self.sr)
+        resp_window_start = delay_min_samples
+        resp_window_end = int((delay_max + duration) * self.sr)
+        resp_window_len = resp_window_end - resp_window_start
+
+        # ch3: 匹配滤波结果
+        # 在响应窗口范围内做互相关
+        # chirp模板取chirp长度部分
+        # 响应取响应窗口部分
+        matched = signal.correlate(
+            response[resp_window_start:resp_window_end],
+            chirp_template[:chirp_duration_samples],
+            mode='full'
+        )
 
         # 计算scale_factor
         matched_max = np.max(np.abs(matched))
-        orig_max = np.max(np.abs(response))
+        orig_max = np.max(np.abs(response[resp_window_start:resp_window_end]))
 
         if matched_max > 0 and orig_max > 0:
             scale_factor = orig_max / matched_max
@@ -92,37 +106,11 @@ class MatchedFilterProcessor:
         output_data[:, 0] = chirp_template  # ch1: 喇叭参考
         output_data[:, 1] = response  # ch2: 麦克风响应
 
-        # ch3: 匹配滤波结果，按表格要求的响应窗口起始位置(delay_min)放置
-        # 响应窗口长度 = delay_max - delay_min + duration
-        resp_window_len = int((delay_max - delay_min + duration) * self.sr)
-        delay_min_samples = int(delay_min * self.sr)
-
-        # 找到matched峰值位置
-        peak_idx = np.argmax(np.abs(matched_scaled))
-
-        # 从峰值位置提取响应窗口长度的数据
-        resp_start = peak_idx - delay_min_samples
-        resp_end = resp_start + resp_window_len
-
-        # 边界处理
-        if resp_start < 0:
-            resp_end -= resp_start
-            resp_start = 0
-        if resp_end > window_len:
-            resp_end = window_len
-            resp_start = max(0, resp_end - resp_window_len)
-
-        # 提取matched结果并放入ch3的delay_min位置
-        matched_window = matched_scaled[resp_start:resp_end]
-        actual_len = len(matched_window)
-
-        # 放入output_data的ch3，从delay_min位置开始
-        if delay_min_samples + actual_len <= window_len:
-            output_data[delay_min_samples:delay_min_samples + actual_len, 2] = matched_window
-        else:
-            # 超长时截断
-            available_len = window_len - delay_min_samples
-            output_data[delay_min_samples:window_len, 2] = matched_window[:available_len]
+        # ch3: 匹配滤波结果，从delay_min位置开始放置
+        # matched长度 = resp_window_len + chirp_duration_samples - 1
+        # 只需要前resp_window_len部分（对应响应窗口）
+        matched_len = min(len(matched_scaled), resp_window_len)
+        output_data[delay_min_samples:delay_min_samples + matched_len, 2] = matched_scaled[:matched_len]
 
         # 生成输出文件名
         # 格式: {raw_name}_mic5_{wave}_{chirp_index:02d}_matched_{date}.wav
