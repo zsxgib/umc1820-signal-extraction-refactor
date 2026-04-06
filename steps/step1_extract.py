@@ -80,13 +80,13 @@ class ChirpExtractor:
                 TWO_SECONDS = int(2.0 * sr)  # 384000 samples
                 output = np.zeros((TWO_SECONDS, 3), dtype=data.dtype)
 
-                # ch1: 喇叭激励（原始通道0，从emission_time开始填充2秒）
+                # ch1: 喇叭激励（原始通道1，从emission_time开始填充2秒）
                 chirp_start = int(emission_time * sr)
                 speaker_end = min(chirp_start + TWO_SECONDS, len(data))
                 speaker_len = speaker_end - chirp_start
                 output[:speaker_len, 0] = data[chirp_start:chirp_start + speaker_len, 0]
 
-                # ch2: mic响应（原始通道6，从emission_time开始填充2秒）
+                # ch2: mic响应（原始通道7，从emission_time开始填充2秒）
                 mic_end = min(chirp_start + TWO_SECONDS, len(data))
                 mic_len = mic_end - chirp_start
                 output[:mic_len, 1] = data[chirp_start:chirp_start + mic_len, MIC_CHANNEL]
