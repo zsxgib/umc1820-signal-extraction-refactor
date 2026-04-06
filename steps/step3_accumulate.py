@@ -78,10 +78,10 @@ class CoherentAccumulator:
         sr, first_data = wavfile.read(files[0])
         window_len = len(first_data)
 
-        # ch1是麦克风响应，用于计算scale_factor
+        # ch2是麦克风响应，用于计算scale_factor
         orig_max = np.max(np.abs(first_data[:, 1].astype(np.float64)))
 
-        # 收集所有文件的ch2（匹配滤波结果）进行累积
+        # 收集所有文件的ch3（匹配滤波结果）进行累积
         all_segments = []
         for f in files:
             _, data = wavfile.read(f)
@@ -167,7 +167,7 @@ class CoherentAccumulator:
             logger.info(f"已加载原始mic信号: {len(mic_full)} 样本")
 
         # 收集每个chirp的speaker参考信号（用于102秒版本的第1通道）
-        # key: (wave_type, chirp_index), value: (ch0_data, ch1_data, window_len)
+        # key: (wave_type, chirp_index), value: (ch1_data, ch2_data, window_len)
         chirp_signals = {}
 
         # 按波型处理
@@ -204,9 +204,9 @@ class CoherentAccumulator:
 
                 # 读取speaker参考和麦克风信号（从第一个文件）
                 sr_ref, ref_data = wavfile.read(files[0])
-                ref_ch0 = ref_data[:, 0].astype(np.float64)
-                ref_ch1 = ref_data[:, 1].astype(np.float64)
-                chirp_signals[key] = (ref_ch0, ref_ch1, len(ref_ch0))
+                ref_ch1 = ref_data[:, 0].astype(np.float64)
+                ref_ch2 = ref_data[:, 1].astype(np.float64)
+                chirp_signals[key] = (ref_ch1, ref_ch2, len(ref_ch1))
 
                 accumulated, window_len = self.accumulate_per_chirp(files)
 
@@ -270,17 +270,17 @@ class CoherentAccumulator:
             # 从第一个 chirp 的数据填充
             first_key = (wave_type, 1)
             if first_key in chirp_signals:
-                ref_ch0, ref_ch1, _ = chirp_signals[first_key]
+                ref_ch1, ref_ch2, _ = chirp_signals[first_key]
                 # 第1通道: 喇叭 chirp 从 0 开始
-                actual_ch0_len = min(chirp_duration_samples, len(ref_ch0), wave_window_len)
-                wave_output[:actual_ch0_len, 0] = ref_ch0[:actual_ch0_len]
+                actual_ch1_len = min(chirp_duration_samples, len(ref_ch1), wave_window_len)
+                wave_output[:actual_ch1_len, 0] = ref_ch1[:actual_ch1_len]
                 # 第2通道: 麦克风响应从 delay_min 开始
-                actual_ch1_len = min(wave_window_len - delay_min_samples, len(ref_ch1))
-                if actual_ch1_len > 0:
-                    wave_output[delay_min_samples:delay_min_samples + actual_ch1_len, 1] = ref_ch1[:actual_ch1_len]
+                actual_ch2_len = min(wave_window_len - delay_min_samples, len(ref_ch2))
+                if actual_ch2_len > 0:
+                    wave_output[delay_min_samples:delay_min_samples + actual_ch2_len, 1] = ref_ch2[:actual_ch2_len]
                 # 第3通道: 同第2通道，mic参考
-                if actual_ch1_len > 0:
-                    wave_output[delay_min_samples:delay_min_samples + actual_ch1_len, 2] = ref_ch1[:actual_ch1_len]
+                if actual_ch2_len > 0:
+                    wave_output[delay_min_samples:delay_min_samples + actual_ch2_len, 2] = ref_ch2[:actual_ch2_len]
 
             wave_output[:, 3] = wave_buffer
 
@@ -295,7 +295,7 @@ class CoherentAccumulator:
 
         # 填充102秒版本的第1通道（喇叭参考）和第3通道（mic参考per-chirp）
         logger.info("填充102秒版本的第1通道和第3通道...")
-        for (wave_type, chirp_index), (ch0_data, ch1_data, window_len) in chirp_signals.items():
+        for (wave_type, chirp_index), (ch1_data, ch2_data, window_len) in chirp_signals.items():
             params = WAVE_PARAMS[wave_type]
             emission_times = params['emission_times']
             delay_min = params['delay_min']
@@ -310,17 +310,17 @@ class CoherentAccumulator:
             start_sample = int(emission_time * self.sr)
 
             # 第1通道: 长度是 chirp 持续时间
-            ch0_len = int(duration * self.sr)
-            actual_ch0_len = min(ch0_len, len(ch0_data), self.total_samples - start_sample)
-            if actual_ch0_len > 0:
-                output_buffer[start_sample:start_sample + actual_ch0_len, 0] = ch0_data[:actual_ch0_len]
+            ch1_len = int(duration * self.sr)
+            actual_ch1_len = min(ch1_len, len(ch1_data), self.total_samples - start_sample)
+            if actual_ch1_len > 0:
+                output_buffer[start_sample:start_sample + actual_ch1_len, 0] = ch1_data[:actual_ch1_len]
 
             # 第3通道: mic参考per-chirp从emission_time + delay_min开始
             resp_start_sample = int((emission_time + delay_min) * self.sr)
             delay_min_samples = int(delay_min * self.sr)
-            actual_ch1_len = min(window_len, len(ch1_data) - delay_min_samples, self.total_samples - resp_start_sample)
-            if actual_ch1_len > 0:
-                output_buffer[resp_start_sample:resp_start_sample + actual_ch1_len, 2] = ch1_data[delay_min_samples:delay_min_samples + actual_ch1_len]
+            actual_ch2_len = min(window_len, len(ch2_data) - delay_min_samples, self.total_samples - resp_start_sample)
+            if actual_ch2_len > 0:
+                output_buffer[resp_start_sample:resp_start_sample + actual_ch2_len, 2] = ch2_data[delay_min_samples:delay_min_samples + actual_ch2_len]
 
         # 生成102秒完整版本
         output_filename_full = f"coherent_accumulation_{self.timestamp}.wav"
