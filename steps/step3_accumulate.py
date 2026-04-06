@@ -3,6 +3,8 @@
 对per-chirp matched文件进行相干累积，输出：
 1. 标准格式：5个波型文件（每个波型所有chirp在正确时间位置）
 2. 102秒完整版本：时间轴拼接后的完整信号
+
+按MIC分离处理，每个MIC独立累积。
 """
 
 import sys
@@ -15,7 +17,7 @@ from scipy import signal
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config.chirp_params import WAVE_PARAMS, WAVE_TYPES, SAMPLE_RATE, MIC_CHANNEL
+from config.chirp_params import WAVE_PARAMS, WAVE_TYPES, SAMPLE_RATE, ACTIVE_MICS, get_mic_channel_name, get_mic_channel_1indexed, get_wave_params_for_mic
 from config.raw_files import VALID_FILES
 from pipeline.config import PipelineConfig
 from pipeline.logging import setup_logging, logger
@@ -49,12 +51,13 @@ class CoherentAccumulator:
             shifted = seg
         return shifted
 
-    def accumulate_per_chirp(self, files: list) -> tuple:
+    def accumulate_per_chirp(self, files: list, mic_name: str) -> tuple:
         """
         对一组per-chirp matched文件进行相干累积
 
         Args:
             files: 同一波型同一chirp编号的所有matched文件路径列表
+            mic_name: MIC名称（如 'mic5'）
 
         Returns:
             tuple: (accumulated_data, window_len) 累积后的数据和窗口长度
@@ -66,9 +69,9 @@ class CoherentAccumulator:
         filename = files[0].name
         parts = filename.replace('.wav', '').split('_')
         try:
-            mic5_idx = parts.index('mic5')
-            wave_type = parts[mic5_idx + 1]
-            chirp_str = parts[mic5_idx + 2]
+            mic_idx = parts.index(mic_name)
+            wave_type = parts[mic_idx + 1]
+            chirp_str = parts[mic_idx + 2]
             chirp_index = int(chirp_str)
         except (ValueError, IndexError):
             logger.error(f"文件名格式错误，无法解析: {filename}")
@@ -115,16 +118,28 @@ class CoherentAccumulator:
 
         return accumulated, window_len
 
-    def run(self) -> bool:
-        """运行相干累积"""
-        self.config.ensure_dirs()
+    def accumulate_for_mic(self, mic_idx: int) -> bool:
+        """
+        对指定MIC进行相干累积
 
-        # 查找所有per-chirp matched文件
-        matched_files = list(self.config.step2_output_dir.glob('*_mic5_*_matched_*.wav'))
-        logger.info(f"找到 {len(matched_files)} 个per-chirp matched文件")
+        Args:
+            mic_idx: MIC索引 (1-8)
+
+        Returns:
+            bool: 是否成功
+        """
+        mic_name = get_mic_channel_name(mic_idx)
+        mic_channel_1indexed = get_mic_channel_1indexed(mic_idx)
+        mic_channel_0indexed = mic_channel_1indexed - 1
+
+        logger.info(f"处理 MIC: {mic_name} (第{mic_channel_1indexed}通道)")
+
+        # 查找该MIC的per-chirp matched文件
+        matched_files = list(self.config.get_step2_dir(mic_name).glob(f'*_{mic_name}_*_matched_*.wav'))
+        logger.info(f"  找到 {len(matched_files)} 个per-chirp matched文件")
 
         if not matched_files:
-            logger.warning("没有找到 matched 文件!")
+            logger.warning(f"  {mic_name}: 没有找到 matched 文件!")
             return False
 
         # 按波型和chirp编号分组
@@ -133,22 +148,22 @@ class CoherentAccumulator:
             filename = f.name
             parts = filename.replace('.wav', '').split('_')
             try:
-                mic5_idx = parts.index('mic5')
-                wave_type = parts[mic5_idx + 1]
-                chirp_str = parts[mic5_idx + 2]
+                mic_idx_pos = parts.index(mic_name)
+                wave_type = parts[mic_idx_pos + 1]
+                chirp_str = parts[mic_idx_pos + 2]
                 chirp_index = int(chirp_str)
                 key = (wave_type, chirp_index)
                 file_groups[key].append(f)
             except (ValueError, IndexError):
-                logger.warning(f"跳过无法解析的文件: {filename}")
+                logger.warning(f"  跳过无法解析的文件: {filename}")
                 continue
 
-        logger.info(f"共有 {len(file_groups)} 个波型/chirp组合")
+        logger.info(f"  共有 {len(file_groups)} 个波型/chirp组合")
 
         # 限制每个组合最多8个文件
-        NUM_MICS = 8
+        MAX_FILES_PER_GROUP = 8
         for key in file_groups:
-            file_groups[key] = sorted(file_groups[key])[:NUM_MICS]
+            file_groups[key] = sorted(file_groups[key])[:MAX_FILES_PER_GROUP]
 
         # 创建102秒完整输出缓冲区
         # 第1通道: 喇叭参考
@@ -156,29 +171,32 @@ class CoherentAccumulator:
         # 第3通道: mic参考截取per-chirp
         # 第4通道: 相干累积结果
         output_buffer = np.zeros((self.total_samples, 4), dtype=np.float64)
-        logger.info(f"创建输出缓冲区: {self.total_samples} 样本 ({self.total_samples/self.sr:.1f}秒)")
+        logger.info(f"  创建输出缓冲区: {self.total_samples} 样本 ({self.total_samples/self.sr:.1f}秒)")
 
         # 加载原始WAV的完整102秒mic信号（第2通道）
         raw_wav_path = self.config.raw_data_dir / VALID_FILES[0]
         if raw_wav_path.exists():
             _, raw_data = wavfile.read(raw_wav_path)
-            mic_full = raw_data[:, MIC_CHANNEL].astype(np.float64)
+            mic_full = raw_data[:, mic_channel_0indexed].astype(np.float64)
             output_buffer[:, 1] = mic_full  # 第2通道: 完整102秒mic响应
-            logger.info(f"已加载原始mic信号: {len(mic_full)} 样本")
+            logger.info(f"  已加载原始mic信号: {len(mic_full)} 样本")
 
         # 收集每个chirp的speaker参考信号（用于102秒版本的第1通道）
         # key: (wave_type, chirp_index), value: (ch1_data, ch2_data, window_len)
         chirp_signals = {}
 
+        # 获取该MIC对应距离的参数
+        wave_params = get_wave_params_for_mic(mic_idx)
+
         # 按波型处理
         for wave_type in WAVE_TYPES:
-            params = WAVE_PARAMS[wave_type]
+            params = wave_params[wave_type]
             emission_times = params['emission_times']
             delay_min = params['delay_min']
             delay_max = params['delay_max']
             duration = params['duration']
 
-            logger.info(f"处理波型: {wave_type}")
+            logger.info(f"  处理波型: {wave_type}")
 
             # 创建该波型的累积buffer（响应窗口长度）
             first_emission = emission_times[0]
@@ -197,7 +215,7 @@ class CoherentAccumulator:
                 key = (wave_type, chirp_index)
 
                 if key not in file_groups:
-                    logger.warning(f"  {wave_type} chirp {chirp_index}: 没有找到文件")
+                    logger.warning(f"    {wave_type} chirp {chirp_index}: 没有找到文件")
                     continue
 
                 files = file_groups[key]
@@ -208,7 +226,7 @@ class CoherentAccumulator:
                 ref_ch2 = ref_data[:, 1].astype(np.float64)
                 chirp_signals[key] = (ref_ch1, ref_ch2, len(ref_ch1))
 
-                accumulated, window_len = self.accumulate_per_chirp(files)
+                accumulated, window_len = self.accumulate_per_chirp(files, mic_name)
 
                 if accumulated is None:
                     continue
@@ -246,7 +264,7 @@ class CoherentAccumulator:
             else:
                 scale = 1.0
 
-            logger.debug(f"  {wave_type}: orig_max={orig_max:.2e}, accum_max={accum_max:.2e}, scale={scale:.4f}")
+            logger.debug(f"    {wave_type}: orig_max={orig_max:.2e}, accum_max={accum_max:.2e}, scale={scale:.4f}")
 
             wave_buffer = wave_buffer * scale
 
@@ -286,15 +304,15 @@ class CoherentAccumulator:
             int32_max = 2147483647
             wave_output = np.clip(wave_output, -int32_max, int32_max).astype(np.int32)
 
-            output_filename = f"{wave_type}_accumulated_{self.timestamp}.wav"
-            output_path = self.config.output_dir / output_filename
+            output_filename = f"{mic_name}_{wave_type}_accumulated_{self.timestamp}.wav"
+            output_path = self.config.get_step3_dir(mic_name) / output_filename
             wavfile.write(output_path, self.sr, wave_output)
-            logger.info(f"  -> {output_filename}")
+            logger.info(f"    -> {output_filename}")
 
         # 填充102秒版本的第1通道（喇叭参考）和第3通道（mic参考per-chirp）
-        logger.info("填充102秒版本的第1通道和第3通道...")
+        logger.info(f"  填充102秒版本的第1通道和第3通道...")
         for (wave_type, chirp_index), (ch1_data, ch2_data, window_len) in chirp_signals.items():
-            params = WAVE_PARAMS[wave_type]
+            params = wave_params[wave_type]
             emission_times = params['emission_times']
             delay_min = params['delay_min']
             duration = params['duration']
@@ -323,15 +341,26 @@ class CoherentAccumulator:
                 output_buffer[resp_start_sample:resp_start_sample + actual_ch2_len, 2] = ch2_data[delay_min_samples:delay_min_samples + actual_ch2_len]
 
         # 生成102秒完整版本
-        output_filename_full = f"coherent_accumulation_{self.timestamp}.wav"
-        output_path_full = self.config.output_dir / output_filename_full
+        output_filename_full = f"{mic_name}_coherent_accumulation_{self.timestamp}.wav"
+        output_path_full = self.config.get_step3_dir(mic_name) / output_filename_full
 
         output_int = np.clip(output_buffer, -2147483647, 2147483647).astype(np.int32)
         wavfile.write(output_path_full, self.sr, output_int)
-        logger.info(f"Step 3 完成: {output_filename_full}")
-        logger.info(f"  形状: {output_int.shape}")
-        logger.info(f"  时长: {len(output_int)/self.sr:.1f}秒")
+        logger.info(f"  {mic_name} 完成: {output_filename_full}")
+        logger.info(f"    形状: {output_int.shape}")
+        logger.info(f"    时长: {len(output_int)/self.sr:.1f}秒")
 
+        return True
+
+    def run(self) -> bool:
+        """运行相干累积"""
+        self.config.ensure_dirs()
+
+        # 对每个MIC分别处理
+        for mic_idx in ACTIVE_MICS:
+            self.accumulate_for_mic(mic_idx)
+
+        logger.info("流水线完成")
         return True
 
 

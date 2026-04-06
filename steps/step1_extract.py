@@ -1,7 +1,7 @@
 """Step 1: 从原始12通道WAV提取标准数据
 
 将每个原始文件的每个chirp响应提取为独立的3通道标准格式文件
-格式: {原始文件名}_mic5_{波型}_{Chirp编号:02d}_extracted_{日期}.wav
+格式: {原始文件名}_{mic}_{波型}_{Chirp编号:02d}_extracted_{日期}.wav
 """
 
 import sys
@@ -13,7 +13,7 @@ from scipy.io import wavfile
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config.chirp_params import WAVE_PARAMS, WAVE_TYPES, SAMPLE_RATE, MIC_CHANNEL
+from config.chirp_params import WAVE_PARAMS, WAVE_TYPES, SAMPLE_RATE, ACTIVE_MICS, get_mic_channel_name, get_mic_channel_1indexed, get_wave_params_for_mic
 from config.raw_files import VALID_FILES, RAW_DATA_DIR
 from pipeline.config import PipelineConfig
 from pipeline.logging import setup_logging, logger
@@ -27,14 +27,13 @@ class ChirpExtractor:
         self.timestamp = datetime.now().strftime('%Y%m%d')
         self.sr = SAMPLE_RATE
 
-    def extract_single_file(self, raw_file: str) -> int:
+    def extract_single_mic(self, raw_file: str, mic_idx: int) -> int:
         """
-        从单个原始文件提取标准数据
+        从单个原始文件提取指定MIC的标准数据
 
-        输出每个chirp为独立的3通道文件：
-        - ch1: 喇叭激励（对应窗口）
-        - ch2: mic响应（对应窗口）
-        - ch3: 0（占位）
+        Args:
+            raw_file: 原始文件名
+            mic_idx: MIC索引 (1-8)
 
         Returns:
             成功提取的chirp数量
@@ -48,13 +47,21 @@ class ChirpExtractor:
         sr, data = wavfile.read(raw_path)
         logger.info(f"读取: {raw_file}, 形状: {data.shape}")
 
+        # 获取MIC信息
+        mic_name = get_mic_channel_name(mic_idx)
+        mic_channel_1indexed = get_mic_channel_1indexed(mic_idx)
+        mic_channel_0indexed = mic_channel_1indexed - 1  # 转为0-indexed供代码使用
+
+        # 获取该MIC对应距离的参数
+        wave_params = get_wave_params_for_mic(mic_idx)
+
         # 提取原始文件名（不含扩展名）
         raw_basename = raw_file.replace('.wav', '')
         success_count = 0
 
         # 按波型、按chirp提取
         for wave_type in WAVE_TYPES:
-            params = WAVE_PARAMS[wave_type]
+            params = wave_params[wave_type]
             emission_times = params['emission_times']
             delay_min = params['delay_min']
             delay_max = params['delay_max']
@@ -86,24 +93,37 @@ class ChirpExtractor:
                 speaker_len = speaker_end - chirp_start
                 output[:speaker_len, 0] = data[chirp_start:chirp_start + speaker_len, 0]
 
-                # ch2: mic响应（原始通道7，从emission_time开始填充2秒）
+                # ch2: mic响应（原始通道mic_channel_1indexed，从emission_time开始填充2秒）
                 mic_end = min(chirp_start + TWO_SECONDS, len(data))
                 mic_len = mic_end - chirp_start
-                output[:mic_len, 1] = data[chirp_start:chirp_start + mic_len, MIC_CHANNEL]
+                output[:mic_len, 1] = data[chirp_start:chirp_start + mic_len, mic_channel_0indexed]
 
                 # ch3: 0（占位，与标准格式一致）
 
                 # 生成输出文件名
-                # 格式: {原始文件名}_mic5_{波型}_{Chirp编号:02d}_extracted_{日期}.wav
-                output_filename = f"{raw_basename}_mic5_{wave_type}_{chirp_index:02d}_extracted_{self.timestamp}.wav"
-                output_path = self.config.standard_data_dir / output_filename
+                # 格式: {原始文件名}_{mic}_{波型}_{Chirp编号:02d}_extracted_{日期}.wav
+                output_filename = f"{raw_basename}_{mic_name}_{wave_type}_{chirp_index:02d}_extracted_{self.timestamp}.wav"
+                output_path = self.config.get_step1_dir(mic_name) / output_filename
 
                 wavfile.write(output_path, sr, output)
                 success_count += 1
                 logger.debug(f"  -> {output_filename}")
 
-        logger.info(f"  {raw_file}: 提取了 {success_count} 个chirp文件")
+        logger.info(f"  {raw_file} ({mic_name}): 提取了 {success_count} 个chirp文件")
         return success_count
+
+    def extract_single_file(self, raw_file: str) -> int:
+        """
+        从单个原始文件提取所有MIC的标准数据
+
+        Returns:
+            成功提取的chirp数量
+        """
+        total_count = 0
+        for mic_idx in ACTIVE_MICS:
+            count = self.extract_single_mic(raw_file, mic_idx)
+            total_count += count
+        return total_count
 
     def run(self) -> int:
         """运行提取流程"""

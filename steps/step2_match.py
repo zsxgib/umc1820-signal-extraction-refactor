@@ -1,7 +1,7 @@
 """Step 2: 匹配滤波处理
 
 对per-chirp标准WAV应用匹配滤波，输出per-chirp matched文件
-格式: {原始文件名}_mic5_{波型}_{Chirp编号:02d}_matched_{日期}.wav
+格式: {原始文件名}_{mic}_{波型}_{Chirp编号:02d}_matched_{日期}.wav
 """
 
 import sys
@@ -13,7 +13,7 @@ from scipy.io import wavfile
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config.chirp_params import WAVE_PARAMS, WAVE_TYPES, SAMPLE_RATE
+from config.chirp_params import WAVE_PARAMS, WAVE_TYPES, SAMPLE_RATE, ACTIVE_MICS, get_mic_channel_name, get_wave_params_for_mic
 from pipeline.config import PipelineConfig
 from pipeline.logging import setup_logging, logger
 
@@ -26,7 +26,7 @@ class MatchedFilterProcessor:
         self.timestamp = datetime.now().strftime('%Y%m%d')
         self.sr = SAMPLE_RATE
 
-    def process_single(self, wav_path: Path) -> bool:
+    def process_single(self, wav_path: Path, mic_name: str, mic_idx: int) -> bool:
         """处理单个per-chirp标准WAV文件"""
         # 验证文件
         if not wav_path.exists():
@@ -44,20 +44,21 @@ class MatchedFilterProcessor:
         logger.debug(f"处理: {filename}, 形状: {data.shape}")
 
         # 从文件名解析波型和chirp编号
-        # 格式: {raw_name}_mic5_{wave}_{chirp_index:02d}_extracted_{date}.wav
+        # 格式: {raw_name}_{mic}_{wave}_{chirp_index:02d}_extracted_{date}.wav
         parts = filename.replace('.wav', '').split('_')
-        # 找到mic5的位置，然后提取波型和chirp编号
+        # 找到mic的位置，然后提取波型和chirp编号
         try:
-            mic5_idx = parts.index('mic5')
-            wave_type = parts[mic5_idx + 1]
-            chirp_str = parts[mic5_idx + 2]  # 如 "01", "02"
+            mic_idx_pos = parts.index(mic_name)
+            wave_type = parts[mic_idx_pos + 1]
+            chirp_str = parts[mic_idx_pos + 2]  # 如 "01", "02"
             chirp_index = int(chirp_str)  # 已经是1-indexed
         except (ValueError, IndexError):
             logger.error(f"文件名格式错误，无法解析: {filename}")
             return False
 
-        # 获取波型参数
-        params = WAVE_PARAMS[wave_type]
+        # 获取该MIC对应距离的波型参数
+        wave_params = get_wave_params_for_mic(mic_idx)
+        params = wave_params[wave_type]
         duration = params['duration']
         delay_min = params['delay_min']
         delay_max = params['delay_max']
@@ -113,7 +114,7 @@ class MatchedFilterProcessor:
         output_data[delay_min_samples:delay_min_samples + matched_len, 2] = matched_scaled[:matched_len]
 
         # 生成输出文件名
-        # 格式: {raw_name}_mic5_{wave}_{chirp_index:02d}_matched_{date}.wav
+        # 格式: {raw_name}_{mic}_{wave}_{chirp_index:02d}_matched_{date}.wav
         # 替换 _extracted_ 为 _matched_
         base_name = filename.replace('.wav', '')
         if '_extracted_' in base_name:
@@ -128,7 +129,7 @@ class MatchedFilterProcessor:
         int32_max = 2147483647
         output_data = np.clip(output_data, -int32_max, int32_max).astype(np.int32)
 
-        output_path = self.config.step2_output_dir / new_filename
+        output_path = self.config.get_step2_dir(mic_name) / new_filename
         wavfile.write(output_path, sr, output_data)
         logger.debug(f"  -> {new_filename}")
 
@@ -136,17 +137,22 @@ class MatchedFilterProcessor:
 
     def run(self) -> int:
         """运行匹配滤波"""
-        # 查找per-chirp标准数据文件
-        files = list(self.config.standard_data_dir.glob('*_mic5_*_extracted_*.wav'))
-        logger.info(f"找到 {len(files)} 个per-chirp标准数据文件")
+        total_success = 0
+        total_files = 0
 
-        success = 0
-        for wav_path in files:
-            if self.process_single(wav_path):
-                success += 1
+        for mic_idx in ACTIVE_MICS:
+            mic_name = get_mic_channel_name(mic_idx)
+            # 查找per-chirp标准数据文件
+            files = list(self.config.get_step1_dir(mic_name).glob(f'*_{mic_name}_*_extracted_*.wav'))
+            logger.info(f"{mic_name}: 找到 {len(files)} 个per-chirp标准数据文件")
+            total_files += len(files)
 
-        logger.info(f"Step 2 完成: 处理了 {success}/{len(files)} 个文件")
-        return success
+            for wav_path in files:
+                if self.process_single(wav_path, mic_name, mic_idx):
+                    total_success += 1
+
+        logger.info(f"Step 2 完成: 处理了 {total_success}/{total_files} 个文件")
+        return total_success
 
 
 def main():
