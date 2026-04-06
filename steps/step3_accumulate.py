@@ -317,9 +317,10 @@ class CoherentAccumulator:
 
             # 第3通道: mic参考per-chirp从emission_time + delay_min开始
             resp_start_sample = int((emission_time + delay_min) * self.sr)
-            actual_ch1_len = min(window_len, len(ch1_data), self.total_samples - resp_start_sample)
+            delay_min_samples = int(delay_min * self.sr)
+            actual_ch1_len = min(window_len, len(ch1_data) - delay_min_samples, self.total_samples - resp_start_sample)
             if actual_ch1_len > 0:
-                output_buffer[resp_start_sample:resp_start_sample + actual_ch1_len, 2] = ch1_data[:actual_ch1_len]
+                output_buffer[resp_start_sample:resp_start_sample + actual_ch1_len, 2] = ch1_data[delay_min_samples:delay_min_samples + actual_ch1_len]
 
         # 生成102秒完整版本
         output_filename_full = f"coherent_accumulation_{self.timestamp}.wav"
