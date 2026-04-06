@@ -256,33 +256,31 @@ class CoherentAccumulator:
             actual_len = end_sample - first_start_sample
             output_buffer[first_start_sample:end_sample, 3] = wave_buffer[:actual_len]
 
-            # 保存标准格式文件（该波型所有chirp在正确时间位置）
-            # 创建4通道输出
-            wave_output = np.zeros((wave_window_len, 4), dtype=np.float64)
+            # 保存标准格式文件（2秒，3通道）
+            # ch1: 喇叭2秒
+            # ch2: mic 2秒
+            # ch3: 相干累积结果(2秒内，从delay_min位置开始)
+            TWO_SECONDS = int(2.0 * self.sr)
+            wave_output = np.zeros((TWO_SECONDS, 3), dtype=np.float64)
 
-            # 第1通道: 喇叭参考，从 0ms 开始（对应 emission_time）
-            # 第2通道: 麦克风响应per-chirp，从 delay_min 开始（对应 emission_time + delay_min）
-            # 第3通道: 麦克风响应per-chirp（参考）
-            # 第4通道: 累积结果
             delay_min_samples = int(delay_min * self.sr)
-            chirp_duration_samples = int(duration * self.sr)
 
-            # 从第一个 chirp 的数据填充
+            # 从第一个 chirp 的数据获取喇叭和mic的2秒数据
             first_key = (wave_type, 1)
             if first_key in chirp_signals:
                 ref_ch1, ref_ch2, _ = chirp_signals[first_key]
-                # 第1通道: 喇叭 chirp 从 0 开始
-                actual_ch1_len = min(chirp_duration_samples, len(ref_ch1), wave_window_len)
+                # ch1: 喇叭2秒
+                actual_ch1_len = min(len(ref_ch1), TWO_SECONDS)
                 wave_output[:actual_ch1_len, 0] = ref_ch1[:actual_ch1_len]
-                # 第2通道: 麦克风响应从 delay_min 开始
-                actual_ch2_len = min(wave_window_len - delay_min_samples, len(ref_ch2))
-                if actual_ch2_len > 0:
-                    wave_output[delay_min_samples:delay_min_samples + actual_ch2_len, 1] = ref_ch2[:actual_ch2_len]
-                # 第3通道: 同第2通道，mic参考
-                if actual_ch2_len > 0:
-                    wave_output[delay_min_samples:delay_min_samples + actual_ch2_len, 2] = ref_ch2[:actual_ch2_len]
+                # ch2: mic 2秒
+                actual_ch2_len = min(len(ref_ch2), TWO_SECONDS)
+                wave_output[:actual_ch2_len, 1] = ref_ch2[:actual_ch2_len]
 
-            wave_output[:, 3] = wave_buffer
+            # ch3: 相干累积结果，从delay_min位置开始放置
+            # wave_buffer长度是响应窗口长度，需要放入2秒的delay_min位置
+            accum_len = min(len(wave_buffer), TWO_SECONDS - delay_min_samples)
+            if accum_len > 0:
+                wave_output[delay_min_samples:delay_min_samples + accum_len, 2] = wave_buffer[:accum_len]
 
             # clip并保存
             int32_max = 2147483647
