@@ -92,7 +92,7 @@ class CoherentAccumulator:
                     data = data[:window_len]
             all_segments.append(data[:, 2].astype(np.float64))
 
-        # 使用第一个segment作为参考
+        # 使用第一个segment作为参考进行cross-correlation对齐
         ref_segment = all_segments[0]
 
         # 累积
@@ -219,9 +219,21 @@ class CoherentAccumulator:
                 start_sample = int(resp_start_time * self.sr)
                 end_sample = int(resp_end_time * self.sr) + int(duration * self.sr)
 
-                # 累积到wave_buffer（只累积到固定长度）
-                actual_len = min(window_len, len(accumulated), wave_window_len)
-                wave_buffer[:actual_len] += accumulated[:actual_len]
+                # 找到累积结果中的峰值位置
+                abs_accum = np.abs(accumulated)
+                peak_idx = np.argmax(abs_accum)
+
+                # 从峰值位置提取响应窗口长度的数据
+                response_len = end_sample - start_sample  # 响应窗口长度
+                actual_len = min(response_len, wave_window_len)
+
+                # 从峰值位置开始提取
+                if peak_idx + actual_len <= len(accumulated):
+                    wave_buffer[:actual_len] += accumulated[peak_idx:peak_idx + actual_len]
+                else:
+                    # 峰值太靠后，提取到末尾
+                    available = len(accumulated) - peak_idx
+                    wave_buffer[:available] += accumulated[peak_idx:]
 
                 logger.debug(f"    {wave_type} chirp {chirp_index}: 累积了 {len(files)} 个文件")
 
