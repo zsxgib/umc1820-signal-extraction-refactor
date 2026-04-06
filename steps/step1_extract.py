@@ -76,35 +76,22 @@ class ChirpExtractor:
                 if resp_start >= len(data):
                     continue
 
-                # 提取窗口数据
-                window_len = resp_end - resp_start
-
                 # 创建3通道输出数组（固定2秒长度）
                 TWO_SECONDS = int(2.0 * sr)  # 384000 samples
                 output = np.zeros((TWO_SECONDS, 3), dtype=data.dtype)
 
-                # delay_min位置
-                delay_min_samples = int(delay_min * sr)
-
-                # 喇叭模板：从 emission_time 整秒时刻开始
+                # ch1: 喇叭激励（原始通道0，从emission_time开始填充2秒）
                 chirp_start = int(emission_time * sr)
-                chirp_end = chirp_start + int(duration * sr)
+                speaker_end = min(chirp_start + TWO_SECONDS, len(data))
+                speaker_len = speaker_end - chirp_start
+                output[:speaker_len, 0] = data[chirp_start:chirp_start + speaker_len, 0]
 
-                # 麦克风响应（对应响应窗口）
-                mic_window = data[resp_start:resp_end, MIC_CHANNEL].astype(np.float64)
+                # ch2: mic响应（原始通道6，从emission_time开始填充2秒）
+                mic_end = min(chirp_start + TWO_SECONDS, len(data))
+                mic_len = mic_end - chirp_start
+                output[:mic_len, 1] = data[chirp_start:chirp_start + mic_len, MIC_CHANNEL]
 
-                # ch0: 喇叭参考（原始通道0，从位置0开始填充chirp数据）
-                chirp_len = chirp_end - chirp_start
-                actual_chirp_len = min(chirp_len, len(data) - chirp_start)
-                if chirp_start >= 0 and chirp_start + actual_chirp_len <= len(data):
-                    output[:actual_chirp_len, 0] = data[chirp_start:chirp_start + actual_chirp_len, 0]
-
-                # ch1: 麦克风（原始通道6，从delay_min位置开始填充响应窗口数据）
-                actual_mic_len = min(len(mic_window), TWO_SECONDS - delay_min_samples)
-                if actual_mic_len > 0:
-                    output[delay_min_samples:delay_min_samples + actual_mic_len, 1] = mic_window[:actual_mic_len]
-
-                # ch2: 0（占位，与标准格式一致）
+                # ch3: 0（占位，与标准格式一致）
 
                 # 生成输出文件名
                 # 格式: {原始文件名}_mic5_{波型}_{Chirp编号:02d}_extracted_{日期}.wav
@@ -113,7 +100,7 @@ class ChirpExtractor:
 
                 wavfile.write(output_path, sr, output)
                 success_count += 1
-                logger.debug(f"  -> {output_filename} ({window_len}样本, {window_len/sr*1000:.1f}ms)")
+                logger.debug(f"  -> {output_filename}")
 
         logger.info(f"  {raw_file}: 提取了 {success_count} 个chirp文件")
         return success_count
