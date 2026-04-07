@@ -13,7 +13,7 @@ from scipy.io import wavfile
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config.chirp_params import WAVE_PARAMS, WAVE_TYPES, SAMPLE_RATE, ACTIVE_MICS, get_mic_channel_name, get_mic_channel_1indexed, get_wave_params_for_mic
+from config.chirp_params import WAVE_PARAMS, WAVE_TYPES, SAMPLE_RATE, ACTIVE_MICS, get_mic_channel_name, get_mic_channel_1indexed, get_wave_params_for_mic, SAVE_FORMAT
 from config.raw_files import VALID_FILES, RAW_DATA_DIR
 from pipeline.config import PipelineConfig
 from pipeline.logging import setup_logging, logger
@@ -101,11 +101,15 @@ class ChirpExtractor:
                 # ch3: 0（占位，与标准格式一致）
 
                 # 生成输出文件名
-                # 格式: {原始文件名}_{mic}_{波型}_{Chirp编号:02d}_extracted_{日期}.wav
-                output_filename = f"{raw_basename}_{mic_name}_{wave_type}_{chirp_index:02d}_extracted_{self.timestamp}.wav"
+                # 格式: {原始文件名}_{mic}_{波型}_{Chirp编号:02d}_extracted_{日期}.{ext}
+                ext = 'npz' if SAVE_FORMAT == 'npz' else 'wav'
+                output_filename = f"{raw_basename}_{mic_name}_{wave_type}_{chirp_index:02d}_extracted_{self.timestamp}.{ext}"
                 output_path = self.config.get_step1_dir(mic_name) / output_filename
 
-                wavfile.write(output_path, sr, output)
+                if SAVE_FORMAT == 'npz':
+                    np.savez_compressed(output_path, data=output)
+                else:
+                    wavfile.write(output_path, sr, output)
                 success_count += 1
                 logger.debug(f"  -> {output_filename}")
 

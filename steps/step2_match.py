@@ -13,7 +13,7 @@ from scipy.io import wavfile
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config.chirp_params import WAVE_PARAMS, WAVE_TYPES, SAMPLE_RATE, ACTIVE_MICS, get_mic_channel_name, get_wave_params_for_mic
+from config.chirp_params import WAVE_PARAMS, WAVE_TYPES, SAMPLE_RATE, ACTIVE_MICS, get_mic_channel_name, get_wave_params_for_mic, SAVE_FORMAT
 from pipeline.config import PipelineConfig
 from pipeline.logging import setup_logging, logger
 
@@ -27,7 +27,7 @@ class MatchedFilterProcessor:
         self.sr = SAMPLE_RATE
 
     def process_single(self, wav_path: Path, mic_name: str, mic_idx: int) -> bool:
-        """处理单个per-chirp标准WAV文件"""
+        """处理单个per-chirp标准文件"""
         # 验证文件
         if not wav_path.exists():
             logger.error(f"文件不存在: {wav_path}")
@@ -39,7 +39,12 @@ class MatchedFilterProcessor:
             return True
 
         # 读取per-chirp数据（3通道：ch1喇叭，ch2麦克风，ch3占位）
-        sr, data = wavfile.read(wav_path)
+        if wav_path.suffix == '.npz':
+            loaded = np.load(wav_path)
+            data = loaded['data']
+            sr = SAMPLE_RATE
+        else:
+            sr, data = wavfile.read(wav_path)
         window_len = len(data)
         logger.debug(f"处理: {filename}, 形状: {data.shape}")
 
@@ -114,23 +119,27 @@ class MatchedFilterProcessor:
         output_data[delay_min_samples:delay_min_samples + matched_len, 2] = matched_scaled[:matched_len]
 
         # 生成输出文件名
-        # 格式: {raw_name}_{mic}_{wave}_{chirp_index:02d}_matched_{date}.wav
+        # 格式: {raw_name}_{mic}_{wave}_{chirp_index:02d}_matched_{date}.{ext}
         # 替换 _extracted_ 为 _matched_
-        base_name = filename.replace('.wav', '')
+        base_name = filename.replace('.wav', '').replace('.npz', '')
         if '_extracted_' in base_name:
             # 提取日期部分
             parts_split = base_name.split('_extracted_')
             new_filename = f"{parts_split[0]}_matched_{parts_split[1]}"
         else:
             new_filename = base_name.replace('_extracted_', '_matched_')
-        new_filename = f"{new_filename}.wav"
+        ext = 'npz' if SAVE_FORMAT == 'npz' else 'wav'
+        new_filename = f"{new_filename}.{ext}"
 
         # clip到int32范围并保存
         int32_max = 2147483647
         output_data = np.clip(output_data, -int32_max, int32_max).astype(np.int32)
 
         output_path = self.config.get_step2_dir(mic_name) / new_filename
-        wavfile.write(output_path, sr, output_data)
+        if SAVE_FORMAT == 'npz':
+            np.savez_compressed(output_path, data=output_data)
+        else:
+            wavfile.write(output_path, sr, output_data)
         logger.debug(f"  -> {new_filename}")
 
         return True
@@ -142,8 +151,10 @@ class MatchedFilterProcessor:
 
         for mic_idx in ACTIVE_MICS:
             mic_name = get_mic_channel_name(mic_idx)
-            # 查找per-chirp标准数据文件
-            files = list(self.config.get_step1_dir(mic_name).glob(f'*_{mic_name}_*_extracted_*.wav'))
+            # 查找per-chirp标准数据文件（npz或wav格式）
+            files = []
+            files.extend(self.config.get_step1_dir(mic_name).glob(f'*_{mic_name}_*_extracted_*.npz'))
+            files.extend(self.config.get_step1_dir(mic_name).glob(f'*_{mic_name}_*_extracted_*.wav'))
             logger.info(f"{mic_name}: 找到 {len(files)} 个per-chirp标准数据文件")
             total_files += len(files)
 

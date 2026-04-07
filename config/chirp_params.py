@@ -50,7 +50,12 @@ SPEAKER_CHANNELS = [0, 1]  # 喇叭左/右
 
 # 同时处理的MIC列表 (1-indexed通道号)
 # MIC索引 -> 1-indexed通道号: MIC1=第3通道, MIC2=第4通道, ..., MIC8=第10通道
-ACTIVE_MICS = [4, 5]  # 当前处理MIC4和MIC5 (第6和第7通道)
+ACTIVE_MICS = [1, 2, 3, 4, 5, 6, 7, 8]  # 处理全部8个MIC
+
+# 存储格式配置: 'npz' 或 'wav'
+# npz: 压缩比约48x，节省98%空间
+# wav: 标准格式，文件更大
+SAVE_FORMAT = 'npz'
 
 def get_mic_channel_name(mic_index: int) -> str:
     """根据MIC索引(1-8)返回通道名"""
@@ -61,9 +66,16 @@ def get_mic_channel_1indexed(mic_index: int) -> int:
     return mic_index + 2  # MIC1=第3通道, MIC8=第10通道
 
 # MIC距离配置（1-indexed）
+# 默认全部设为50米，后续可根据实际情况调整
 MIC_DISTANCES = {
-    4: 40,  # MIC4 在40米
+    1: 50,  # MIC1 在50米
+    2: 50,  # MIC2 在50米
+    3: 50,  # MIC3 在50米
+    4: 50,  # MIC4 在50米
     5: 50,  # MIC5 在50米
+    6: 50,  # MIC6 在50米
+    7: 50,  # MIC7 在50米
+    8: 50,  # MIC8 在50米
 }
 
 # 按距离索引的完整参数表（来自HDPE膜声学检测完整参数表）
